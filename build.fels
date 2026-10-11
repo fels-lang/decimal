@@ -1,0 +1,10 @@
+#import std.build.{ Build };
+
+// The library is its sources in src/: others use them with `fels add`. This builds the
+// example, which imports the library as they do.
+build :: fn(b: Build) {
+    b.out_root("bin");
+    demo := b.executable("demo", "examples/demo.fels");
+    b.run_step("run", demo);
+    b.default(demo);
+}

@@ -1,0 +1,27 @@
+// decimal: what the library offers. Everything marked `pub` is for its users.
+
+// `x`, kept between `lo` and `hi`.
+pub clamp :: fn(x: i32, lo: i32, hi: i32) -> i32 {
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
+}
+
+// The larger of `a` and `b`.
+pub max :: fn(a: i32, b: i32) -> i32 {
+    if a > b { return a; }
+    return b;
+}
+
+#test
+clamp_keeps_values_in_range :: fn(t: *Test) {
+    t.eq(clamp(5, 0, 10), 5);
+    t.eq(clamp(-5, 0, 10), 0);
+    t.eq(clamp(50, 0, 10), 10);
+}
+
+#test
+max_takes_the_larger :: fn(t: *Test) {
+    t.eq(max(3, 7), 7);
+    t.eq(max(7, 3), 7);
+}

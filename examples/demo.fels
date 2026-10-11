@@ -1,0 +1,9 @@
+#import std.io;
+#import decimal;
+
+main :: fn() -> i32 {
+    io::print("clamp(42, 0, 10) = ");
+    io::print_i64(decimal::clamp(42, 0, 10) as i64);
+    io::println("");
+    return 0;
+}
