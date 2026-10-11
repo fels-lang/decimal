@@ -1,27 +1,444 @@
-// decimal: what the library offers. Everything marked `pub` is for its users.
+// decimal: fixed-point decimal numbers, made for money.
+//
+// A Decimal is a whole number of units and a scale: 12.34 is 1234 units at scale 2. Adding,
+// subtracting and comparing are exact. Multiplying and dividing compute the exact result and
+// round it once, to the scale and with the rounding you ask for:
+//
+//   price := decimal::parse("19.99") ?? decimal::zero();
+//   qty   := decimal::from_int(3i64);
+//   gross := price.mul(qty, 2u8, .half_even);                                      // 59.97
+//   net   := gross.div(decimal::parse("1.19") ?? decimal::one(), 2u8, .half_even);   // 50.39
+//
+// A scale is 0 to 18 digits after the point; the units are an i64, so at scale 2 the largest
+// amount is about 92 million billion. A result that does not fit panics with
+// "decimal: overflow", as a wrong amount must never pass silently. Two values are equal in
+// value when `a.eq(b)` (1.50 and 1.5 are), while `==` compares units and scale.
 
-// `x`, kept between `lo` and `hi`.
-pub clamp :: fn(x: i32, lo: i32, hi: i32) -> i32 {
-    if x < lo { return lo; }
-    if x > hi { return hi; }
-    return x;
+// How a result that falls between two values at its scale is rounded.
+pub Rounding :: enum {
+    half_even,   // to the nearest, a tie to the even one (banker's rounding)
+    half_up,     // to the nearest, a tie away from zero (as taught in school)
+    down,        // toward zero
+    up,          // away from zero
+    floor,       // toward minus infinity
+    ceiling,     // toward plus infinity
 }
 
-// The larger of `a` and `b`.
-pub max :: fn(a: i32, b: i32) -> i32 {
+pub Decimal :: struct {
+    units: i64,   // the value times 10^scale
+    scale: u8,    // digits after the point, 0 … 18
+
+    pub is_zero :: fn(self: Self) -> bool { return self.units == 0i64; }
+
+    // -1, 0 or 1.
+    pub sign :: fn(self: Self) -> i32 {
+        if self.units < 0i64 { return -1; }
+        if self.units > 0i64 { return 1; }
+        return 0;
+    }
+
+    pub neg :: fn(self: Self) -> Decimal {
+        if self.units == min_units() { overflow(); }
+        return of(0i64 - self.units, self.scale);
+    }
+
+    pub abs :: fn(self: Self) -> Decimal {
+        if self.units < 0i64 { return self.neg(); }
+        return self;
+    }
+
+    // The exact sum, at the larger of the two scales.
+    pub add :: fn(self: Self, other: Decimal) -> Decimal {
+        s := max_scale(self.scale, other.scale);
+        return of(add_units(rescale_up(self, s), rescale_up(other, s)), s);
+    }
+
+    // The exact difference, at the larger of the two scales.
+    pub sub :: fn(self: Self, other: Decimal) -> Decimal {
+        s := max_scale(self.scale, other.scale);
+        b := rescale_up(other, s);
+        if b == min_units() { overflow(); }
+        return of(add_units(rescale_up(self, s), 0i64 - b), s);
+    }
+
+    // The product, rounded to `scale` digits with `mode`.
+    pub mul :: fn(self: Self, other: Decimal, scale: u8, mode: Rounding) -> Decimal {
+        check_scale(scale);
+        p := w_mul64(magnitude(self.units), magnitude(other.units));
+        negative := (self.units < 0i64) != (other.units < 0i64);
+        return from_wide(p, self.scale + other.scale, negative, scale, mode);
+    }
+
+    // The quotient, rounded to `scale` digits with `mode`. Panics when `other` is zero.
+    pub div :: fn(self: Self, other: Decimal, scale: u8, mode: Rounding) -> Decimal {
+        check_scale(scale);
+        if other.units == 0i64 { core::panic("decimal: division by zero"); }
+        negative := (self.units < 0i64) != (other.units < 0i64);
+        // self / other at `scale` is self.units * 10^e / other.units with
+        // e = scale + other.scale - self.scale.
+        e: i32 = (scale as i32) + (other.scale as i32) - (self.scale as i32);
+        n := w_of(magnitude(self.units));
+        d := w_of(magnitude(other.units));
+        if e >= 0 {
+            n = w_mul_pow10(n, e as u8) ?? overflow_w();
+        } else {
+            d = w_mul_pow10(d, (0 - e) as u8) ?? overflow_w();
+        }
+        qr := w_divmod(n, d);
+        return to_decimal(round_wide(qr.q, qr.r, d, negative, mode), negative, scale);
+    }
+
+    // The value at `scale` digits: exact when `scale` is not smaller, else rounded with
+    // `mode`.
+    pub round :: fn(self: Self, scale: u8, mode: Rounding) -> Decimal {
+        check_scale(scale);
+        return from_wide(w_of(magnitude(self.units)), self.scale, self.units < 0i64, scale, mode);
+    }
+
+    // -1, 0 or 1 as this value is less than, equal to or greater than `other`, whatever their
+    // scales.
+    pub cmp :: fn(self: Self, other: Decimal) -> i32 {
+        if self.sign() != other.sign() {
+            if self.sign() < other.sign() { return -1; }
+            return 1;
+        }
+        s := max_scale(self.scale, other.scale);
+        a := w_mul_pow10(w_of(magnitude(self.units)), s - self.scale) ?? overflow_w();
+        b := w_mul_pow10(w_of(magnitude(other.units)), s - other.scale) ?? overflow_w();
+        c := w_cmp(a, b);
+        if self.units < 0i64 { return 0 - c; }
+        return c;
+    }
+
+    // Equal in value: 1.50 equals 1.5.
+    pub eq :: fn(self: Self, other: Decimal) -> bool { return self.cmp(other) == 0; }
+    pub lt :: fn(self: Self, other: Decimal) -> bool { return self.cmp(other) < 0; }
+    pub le :: fn(self: Self, other: Decimal) -> bool { return self.cmp(other) <= 0; }
+    pub gt :: fn(self: Self, other: Decimal) -> bool { return self.cmp(other) > 0; }
+    pub ge :: fn(self: Self, other: Decimal) -> bool { return self.cmp(other) >= 0; }
+
+    // The nearest f64, for charts and statistics; never for amounts that are booked.
+    pub to_f64 :: fn(self: Self) -> f64 {
+        p: f64 = 1.0;
+        i: u8 = 0u8;
+        while i < self.scale {
+            p = p * 10.0;
+            i += 1u8;
+        }
+        return (self.units as f64) / p;
+    }
+}
+
+// Making values
+
+// `units` at `scale` (0 … 18): of(1234, 2) is 12.34.
+pub of :: fn(units: i64, scale: u8) -> Decimal {
+    check_scale(scale);
+    out: Decimal = .{ units, scale };
+    return out;
+}
+
+// A whole number, at scale 0.
+pub from_int :: fn(n: i64) -> Decimal { return of(n, 0u8); }
+
+pub zero :: fn() -> Decimal { return of(0i64, 0u8); }
+pub one  :: fn() -> Decimal { return of(1i64, 0u8); }
+
+// The number written in `text`: an optional sign, digits, and optionally a point and up to
+// 18 more digits ("-1234.56"). The scale is the number of digits after the point. Null when
+// `text` is no such number or it does not fit.
+pub parse :: fn(text: []const u8) -> ?Decimal { return parse_with(text, 46u8, 0u8); }
+
+// `parse` with another decimal point and a group separator for the digits before the point:
+// parse_with("1.234,56", ',', '.') is 1234.56. A `group` of 0 allows none.
+pub parse_with :: fn(text: []const u8, point: u8, group: u8) -> ?Decimal {
+    i: usize = 0usize;
+    negative := false;
+    if text.len > 0usize && (text[0] == 45u8 || text[0] == 43u8) {
+        negative = text[0] == 45u8;
+        i = 1usize;
+    }
+    w := w_of(0u64);
+    digits: usize = 0usize;
+    scale: usize = 0usize;
+    in_fraction := false;
+    while i < text.len {
+        c := text[i];
+        if c >= 48u8 && c <= 57u8 {
+            // Below 2^64 before, so ten times it plus a digit fits.
+            w = w_add(w_mul(w, 10u64) ?? overflow_w(), w_of((c - 48u8) as u64));
+            if w.hi != 0u64 { return null; }
+            digits += 1usize;
+            if in_fraction { scale += 1usize; }
+        } else if c == point && !in_fraction {
+            in_fraction = true;
+        } else if group != 0u8 && c == group && !in_fraction && digits > 0usize {
+            // a separator between groups of digits
+        } else {
+            return null;
+        }
+        i += 1usize;
+    }
+    if digits == 0usize || scale > 18usize { return null; }
+    if !w_fits_i64(w, negative) { return null; }
+    return of(w_to_i64(w, negative), scale as u8);
+}
+
+// Writing values
+
+// `d` written as "-1234.56", with all its digits after the point, into `buf`; the part of
+// `buf` it filled. Empty when `buf` is too small (42 bytes always do).
+pub format :: fn(d: Decimal, buf: []u8) -> []const u8 { return format_with(d, buf, 46u8, 0u8); }
+
+// `format` with another decimal point and, unless `group` is 0, a separator between groups of
+// three digits: format_with(of(123456, 2), buf, ',', '.') is "1.234,56".
+pub format_with :: fn(d: Decimal, buf: []u8, point: u8, group: u8) -> []const u8 {
+    // The digits of the magnitude, last first, at least one before the point.
+    digits: [20]u8 = .{};
+    n: usize = 0usize;
+    m := magnitude(d.units);
+    while m != 0u64 || n <= (d.scale as usize) {
+        digits[n] = 48u8 + ((m % 10u64) as u8);
+        m = m / 10u64;
+        n += 1usize;
+    }
+    whole: usize = n - (d.scale as usize);
+    size: usize = n;
+    if d.units < 0i64 { size += 1usize; }
+    if d.scale != 0u8 { size += 1usize; }
+    if group != 0u8 { size += (whole - 1usize) / 3usize; }
+    if buf.len < size { return buf[0usize..0usize]; }
+
+    at: usize = 0usize;
+    if d.units < 0i64 {
+        buf[at] = 45u8;
+        at += 1usize;
+    }
+    k: usize = 0usize;
+    while k < whole {
+        if group != 0u8 && k != 0usize && (whole - k) % 3usize == 0usize {
+            buf[at] = group;
+            at += 1usize;
+        }
+        buf[at] = digits[n - 1usize - k];
+        at += 1usize;
+        k += 1usize;
+    }
+    if d.scale != 0u8 {
+        buf[at] = point;
+        at += 1usize;
+        while k < n {
+            buf[at] = digits[n - 1usize - k];
+            at += 1usize;
+            k += 1usize;
+        }
+    }
+    return buf[0usize..at];
+}
+
+// Inside
+
+// The smallest i64. A function, not a constant: fels 0.6 typed a constant made of typed
+// values as an i32.
+min_units :: fn() -> i64 { return -9223372036854775807i64 - 1i64; }
+MAX_UNITS :: 9223372036854775807i64;
+
+overflow :: fn() { core::panic("decimal: overflow"); }
+
+// For `??`: a wide number that is never there, as `overflow` panics.
+overflow_w :: fn() -> W {
+    core::panic("decimal: overflow");
+    return w_of(0u64);
+}
+
+check_scale :: fn(scale: u8) {
+    if scale > 18u8 { core::panic("decimal: a scale is 0 to 18 digits"); }
+}
+
+max_scale :: fn(a: u8, b: u8) -> u8 {
     if a > b { return a; }
     return b;
 }
 
-#test
-clamp_keeps_values_in_range :: fn(t: *Test) {
-    t.eq(clamp(5, 0, 10), 5);
-    t.eq(clamp(-5, 0, 10), 0);
-    t.eq(clamp(50, 0, 10), 10);
+// |x| as a u64 (also for the smallest i64).
+magnitude :: fn(x: i64) -> u64 {
+    if x >= 0i64 { return x as u64; }
+    return ((0i64 - (x + 1i64)) as u64) + 1u64;
 }
 
-#test
-max_takes_the_larger :: fn(t: *Test) {
-    t.eq(max(3, 7), 7);
-    t.eq(max(7, 3), 7);
+// The units of `d` at the larger scale `s`, exactly.
+rescale_up :: fn(d: Decimal, s: u8) -> i64 {
+    w := w_mul_pow10(w_of(magnitude(d.units)), s - d.scale) ?? overflow_w();
+    if !w_fits_i64(w, d.units < 0i64) { overflow(); }
+    return w_to_i64(w, d.units < 0i64);
+}
+
+// a + b, or a panic when it does not fit.
+add_units :: fn(a: i64, b: i64) -> i64 {
+    if b > 0i64 && a > MAX_UNITS - b { overflow(); }
+    if b < 0i64 && a < min_units() - b { overflow(); }
+    return a + b;
+}
+
+// The magnitude `w` at scale `from` (and its sign), brought to scale `to` with `mode`.
+from_wide :: fn(w: W, from: u8, negative: bool, to: u8, mode: Rounding) -> Decimal {
+    if to >= from {
+        up := w_mul_pow10(w, to - from) ?? overflow_w();
+        return to_decimal(up, negative, to);
+    }
+    d := w_pow10(from - to);
+    qr := w_divmod(w, d);
+    return to_decimal(round_wide(qr.q, qr.r, d, negative, mode), negative, to);
+}
+
+to_decimal :: fn(w: W, negative: bool, scale: u8) -> Decimal {
+    if !w_fits_i64(w, negative) { overflow(); }
+    return of(w_to_i64(w, negative), scale);
+}
+
+// The quotient `q` of a division by `d` that left `r`, rounded with `mode`. `negative` is the
+// sign of the result, whose magnitude `q` is.
+round_wide :: fn(q: W, r: W, d: W, negative: bool, mode: Rounding) -> W {
+    if w_is_zero(r) { return q; }
+    up := false;
+    match mode {
+        .down      => { up = false; }
+        .up        => { up = true; }
+        .floor     => { up = negative; }
+        .ceiling   => { up = !negative; }
+        .half_up   => { up = w_cmp(w_shl1(r), d) >= 0; }
+        .half_even => {
+            c := w_cmp(w_shl1(r), d);
+            up = c > 0 || (c == 0 && (q.lo & 1u64) == 1u64);
+        }
+    }
+    if up { return w_add(q, w_of(1u64)); }
+    return q;
+}
+
+// Wide numbers: unsigned 128 bits, for the products and quotients on the way
+
+W :: struct { hi: u64, lo: u64 }
+
+QR :: struct { q: W, r: W }
+
+LOW32 :: 4294967295u64;
+TOP_BIT :: 9223372036854775808u64;
+ALL_BITS :: 18446744073709551615u64;
+
+w_of :: fn(x: u64) -> W {
+    out: W = .{ 0u64, x };
+    return out;
+}
+
+w_is_zero :: fn(a: W) -> bool { return a.hi == 0u64 && a.lo == 0u64; }
+
+// a * b in full.
+w_mul64 :: fn(a: u64, b: u64) -> W {
+    a0 := a & LOW32;
+    a1 := a >> 32u64;
+    b0 := b & LOW32;
+    b1 := b >> 32u64;
+    p00 := a0 * b0;
+    p01 := a0 * b1;
+    p10 := a1 * b0;
+    p11 := a1 * b1;
+    mid := (p00 >> 32u64) + (p01 & LOW32) + (p10 & LOW32);
+    out: W = .{
+        p11 + (p01 >> 32u64) + (p10 >> 32u64) + (mid >> 32u64),
+        (p00 & LOW32) | ((mid & LOW32) << 32u64),
+    };
+    return out;
+}
+
+// a * b, or null when it needs more than 128 bits.
+w_mul :: fn(a: W, b: u64) -> ?W {
+    low := w_mul64(a.lo, b);
+    high := w_mul64(a.hi, b);
+    if high.hi != 0u64 { return null; }
+    if high.lo > ALL_BITS - low.hi { return null; }
+    out: W = .{ low.hi + high.lo, low.lo };
+    return out;
+}
+
+// a * 10^k, or null when it needs more than 128 bits.
+w_mul_pow10 :: fn(a: W, k: u8) -> ?W {
+    out := a;
+    i: u8 = 0u8;
+    while i < k {
+        next := w_mul(out, 10u64);
+        if next == null { return null; }
+        out = next!!;
+        i += 1u8;
+    }
+    return out;
+}
+
+// 10^k for k up to 38.
+w_pow10 :: fn(k: u8) -> W { return w_mul_pow10(w_of(1u64), k) ?? overflow_w(); }
+
+// a + b; the callers keep it below 2^128.
+w_add :: fn(a: W, b: W) -> W {
+    lo := a.lo +% b.lo;
+    carry: u64 = 0u64;
+    if lo < a.lo { carry = 1u64; }
+    out: W = .{ a.hi + b.hi + carry, lo };
+    return out;
+}
+
+// a - b for a >= b.
+w_sub :: fn(a: W, b: W) -> W {
+    taken: u64 = 0u64;
+    if a.lo < b.lo { taken = 1u64; }
+    out: W = .{ a.hi - b.hi - taken, a.lo -% b.lo };
+    return out;
+}
+
+w_cmp :: fn(a: W, b: W) -> i32 {
+    if a.hi != b.hi {
+        if a.hi < b.hi { return -1; }
+        return 1;
+    }
+    if a.lo < b.lo { return -1; }
+    if a.lo > b.lo { return 1; }
+    return 0;
+}
+
+// a * 2; the callers keep a below 2^127.
+w_shl1 :: fn(a: W) -> W {
+    out: W = .{ (a.hi << 1u64) | (a.lo >> 63u64), a.lo << 1u64 };
+    return out;
+}
+
+// n / d and n % d for d > 0, by long division one bit at a time.
+w_divmod :: fn(n: W, d: W) -> QR {
+    q := w_of(0u64);
+    r := w_of(0u64);
+    i: i32 = 127;
+    while i >= 0 {
+        r = w_shl1(r);
+        bit: u64 = 0u64;
+        if i >= 64 { bit = (n.hi >> ((i - 64) as u64)) & 1u64; } else { bit = (n.lo >> (i as u64)) & 1u64; }
+        r.lo = r.lo | bit;
+        if w_cmp(r, d) >= 0 {
+            r = w_sub(r, d);
+            if i >= 64 { q.hi = q.hi | (1u64 << ((i - 64) as u64)); } else { q.lo = q.lo | (1u64 << (i as u64)); }
+        }
+        i -= 1;
+    }
+    out: QR = .{ q, r };
+    return out;
+}
+
+// Whether the magnitude `w` with that sign is an i64.
+w_fits_i64 :: fn(w: W, negative: bool) -> bool {
+    if w.hi != 0u64 { return false; }
+    if negative { return w.lo <= TOP_BIT; }
+    return w.lo < TOP_BIT;
+}
+
+w_to_i64 :: fn(w: W, negative: bool) -> i64 {
+    if !negative { return w.lo as i64; }
+    if w.lo == TOP_BIT { return min_units(); }
+    return 0i64 - (w.lo as i64);
 }
