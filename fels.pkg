@@ -1,0 +1,3 @@
+#package decimal "0.1.0";
+#license "MIT";
+#description "Fixed-point decimal numbers for money: exact arithmetic, rounding modes, parsing and formatting";
