@@ -18,7 +18,7 @@ Fixed-point decimal numbers for [Fels](https://github.com/fels-lang/fels), made 
 ## Use it
 
 ```
-fels add decimal github.com/<you>/decimal
+fels add decimal github.com/fels-lang/decimal
 ```
 
 ```fels
