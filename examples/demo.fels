@@ -1,9 +1,22 @@
+// An invoice line with VAT, in euros, written the German way.
 #import std.io;
 #import decimal;
+#import decimal.{ Decimal };
+
+show :: fn(label: []const u8, x: Decimal) {
+    buf: [48]u8 = .{};
+    io::print(label);
+    io::print(decimal::format_with(x, buf[:], 44u8, 46u8));
+    io::println(" EUR");
+}
 
 main :: fn() -> i32 {
-    io::print("clamp(42, 0, 10) = ");
-    io::print_i64(decimal::clamp(42, 0, 10) as i64);
-    io::println("");
+    price := decimal::parse("1999.99") ?? decimal::zero();
+    vat_rate := decimal::parse("0.19") ?? decimal::zero();
+    net := price.mul(decimal::from_int(3i64), 2u8, .half_even);
+    vat := net.mul(vat_rate, 2u8, .half_even);
+    show("net:   ", net);
+    show("VAT:   ", vat);
+    show("total: ", net.add(vat));
     return 0;
 }
