@@ -1,0 +1,132 @@
+// The tests of decimal. They live in their own file, so a program that imports decimal does
+// not run them when it builds.
+#import decimal;
+#import decimal.{ Decimal };
+
+d :: fn(text: []const u8) -> Decimal { return decimal::parse(text) ?? decimal::of(-999999i64, 0u8); }
+
+// `x` written out, compared with `want`.
+is :: fn(t: *Test, x: Decimal, want: []const u8) {
+    buf: [48]u8 = .{};
+    t.eq(decimal::format(x, buf[:]), want);
+}
+
+#test
+parses_and_formats :: fn(t: *Test) {
+    is(t, d("12.34"), "12.34");
+    is(t, d("-0.05"), "-0.05");
+    is(t, d("+7"), "7");
+    is(t, d("1000000"), "1000000");
+    is(t, d("0.000000000000000001"), "0.000000000000000001");
+    is(t, d("9223372036854775807"), "9223372036854775807");
+    is(t, d("-9223372036854775808"), "-9223372036854775808");
+    x := d("12.340");
+    t.eq(x.units, 12340i64);
+    t.eq(x.scale, 3u8);
+}
+
+#test
+refuses_what_is_no_number :: fn(t: *Test) {
+    t.expect(decimal::parse("") == null);
+    t.expect(decimal::parse("-") == null);
+    t.expect(decimal::parse("1.2.3") == null);
+    t.expect(decimal::parse("12a") == null);
+    t.expect(decimal::parse("1,5") == null);
+    t.expect(decimal::parse("9223372036854775808") == null);
+    t.expect(decimal::parse("0.0000000000000000001") == null);
+}
+
+#test
+german_numbers :: fn(t: *Test) {
+    x := decimal::parse_with("1.234.567,89", 44u8, 46u8) ?? decimal::zero();
+    is(t, x, "1234567.89");
+    buf: [48]u8 = .{};
+    t.eq(decimal::format_with(x, buf[:], 44u8, 46u8), "1.234.567,89");
+    t.eq(decimal::format_with(d("-123.5"), buf[:], 44u8, 46u8), "-123,5");
+    t.eq(decimal::format_with(d("999"), buf[:], 44u8, 46u8), "999");
+    t.eq(decimal::format_with(d("1000"), buf[:], 44u8, 46u8), "1.000");
+}
+
+#test
+adds_and_subtracts_exactly :: fn(t: *Test) {
+    is(t, d("0.1").add(d("0.2")), "0.3");
+    is(t, d("19.99").add(d("0.015")), "20.005");
+    is(t, d("10").sub(d("0.01")), "9.99");
+    is(t, d("-5.5").add(d("2.25")), "-3.25");
+    is(t, d("1.5").neg(), "-1.5");
+    is(t, d("-1.5").abs(), "1.5");
+}
+
+#test
+compares_by_value :: fn(t: *Test) {
+    t.expect(d("1.50").eq(d("1.5")));
+    t.expect(d("1.49").lt(d("1.5")));
+    t.expect(d("-2").lt(d("-1.99")));
+    t.expect(d("0").gt(d("-0.01")));
+    t.eq(d("3").cmp(d("3.000")), 0);
+    t.eq(d("-3").cmp(d("3")), -1);
+    t.expect(d("0.00").is_zero());
+    t.eq(d("-0.5").sign(), -1);
+}
+
+#test
+multiplies_and_rounds_once :: fn(t: *Test) {
+    is(t, d("19.99").mul(decimal::from_int(3i64), 2u8, .half_even), "59.97");
+    // 1.005 * 1 at 2 digits: a tie
+    is(t, d("1.005").mul(decimal::one(), 2u8, .half_even), "1.00");
+    is(t, d("1.005").mul(decimal::one(), 2u8, .half_up), "1.01");
+    is(t, d("1.015").mul(decimal::one(), 2u8, .half_even), "1.02");
+    // shares times price: 12.3456 * 98.76 = 1219.251456
+    is(t, d("12.3456").mul(d("98.76"), 2u8, .half_even), "1219.25");
+    is(t, d("12.3456").mul(d("98.76"), 6u8, .half_even), "1219.251456");
+    is(t, d("12.3456").mul(d("98.76"), 8u8, .half_even), "1219.25145600");
+    is(t, d("-2.5").mul(decimal::one(), 0u8, .half_even), "-2");
+    is(t, d("-2.5").mul(decimal::one(), 0u8, .half_up), "-3");
+}
+
+#test
+rounding_modes :: fn(t: *Test) {
+    x := d("2.345");
+    y := d("-2.345");
+    is(t, x.round(2u8, .down), "2.34");
+    is(t, y.round(2u8, .down), "-2.34");
+    is(t, x.round(2u8, .up), "2.35");
+    is(t, y.round(2u8, .up), "-2.35");
+    is(t, x.round(2u8, .floor), "2.34");
+    is(t, y.round(2u8, .floor), "-2.35");
+    is(t, x.round(2u8, .ceiling), "2.35");
+    is(t, y.round(2u8, .ceiling), "-2.34");
+    is(t, x.round(2u8, .half_even), "2.34");
+    is(t, x.round(2u8, .half_up), "2.35");
+    is(t, d("2.355").round(2u8, .half_even), "2.36");
+    is(t, d("2.3").round(4u8, .half_even), "2.3000");
+}
+
+#test
+divides_and_rounds_once :: fn(t: *Test) {
+    is(t, d("59.97").div(d("1.19"), 2u8, .half_even), "50.39");
+    is(t, d("1").div(d("3"), 6u8, .half_even), "0.333333");
+    is(t, d("2").div(d("3"), 6u8, .half_even), "0.666667");
+    is(t, d("-2").div(d("3"), 6u8, .down), "-0.666666");
+    is(t, d("10").div(d("4"), 0u8, .half_even), "2");
+    is(t, d("10").div(d("4"), 0u8, .half_up), "3");
+    // a divisor with more digits than the result keeps
+    is(t, d("1").div(d("0.0003"), 2u8, .half_even), "3333.33");
+    is(t, d("123.456789").div(d("1000"), 0u8, .half_even), "0");
+}
+
+#test
+large_products_do_not_lose_digits :: fn(t: *Test) {
+    // 92233720368.54775807 * 2 does not fit at scale 8, but at scale 2 it does
+    big := d("92233720368.54775807");
+    is(t, big.mul(decimal::from_int(2i64), 2u8, .half_even), "184467440737.10");
+    // 18 digits times 18 digits, back to 18 digits
+    x := d("0.123456789012345678");
+    is(t, x.mul(x, 18u8, .half_even), "0.015241578753238837");
+}
+
+#test
+to_f64_for_charts :: fn(t: *Test) {
+    t.expect(d("12.5").to_f64() == 12.5);
+    t.expect(d("-0.25").to_f64() == -0.25);
+}
